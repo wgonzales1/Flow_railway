@@ -356,8 +356,8 @@ def recolectar():
 # Arranque
 # ─────────────────────────────────────────────
 recolectar()
-
-schedule.every(20).minutes.do(recolectar)
+#cambiar 1 a 20 min
+schedule.every(1).minutes.do(recolectar)
 
 print("\nScheduler activo. Recolectando cada 20 min, exportando a GitHub cada 2 horas...")
 while True:
