@@ -19,7 +19,7 @@ import base64
 
 API_KEY      = os.environ.get("TOMTOM_API_KEY", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO  = "wgonzales1/Incidentes_railway"
+GITHUB_REPO  = "wgonzales1/Flow_railway"
 OUTPUT_FILE  = "data/flujo_antofagasta.csv"
 
 ZOOM = 16  # Mayor zoom = segmentos más precisos a nivel calle
