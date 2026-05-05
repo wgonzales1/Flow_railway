@@ -2,8 +2,7 @@
 recolectar_flujo.py
 -------------------
 Recolecta datos de flujo de tráfico (Traffic Flow) desde la API de TomTom
-para la ciudad de Antofagasta, los acumula en un CSV local y los sube a
-GitHub cada 6 ciclos (~2 horas, si se ejecuta cada 20 minutos).
+para vías principales de Antofagasta, usando puntos fijos sobre cada avenida.
 
 Variables de entorno requeridas:
   TOMTOM_API_KEY  — clave de la API de TomTom
@@ -17,106 +16,148 @@ import os
 import time
 import schedule
 import base64
-import itertools
 
-# ─────────────────────────────────────────────
-# Configuración
-# ─────────────────────────────────────────────
 API_KEY      = os.environ.get("TOMTOM_API_KEY", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO  = "wgonzales1/Incidentes_railway"   # ← ajusta si el repo es diferente
+GITHUB_REPO  = "wgonzales1/Incidentes_railway"
 OUTPUT_FILE  = "data/flujo_antofagasta.csv"
 
-# Bounding box de Antofagasta (lon_min, lat_min, lon_max, lat_max)
-ANTOFAGASTA_BBOX = (-70.45, -23.75, -70.35, -23.55)
+ZOOM = 16  # Mayor zoom = segmentos más precisos a nivel calle
 
-# Zoom usado para consultar flowSegmentData (14–18 recomendado para ciudad)
-ZOOM = 14
+# ─────────────────────────────────────────────────────────────
+# PUNTOS FIJOS POR VÍA
+# Cada punto: (latitud, longitud, nombre_via, tramo)
+# Espaciados ~300-400 m entre sí sobre cada vía
+# ─────────────────────────────────────────────────────────────
+PUNTOS_FIJOS = [
 
-# Resolución de la grilla de puntos de muestreo dentro del bbox
-# Más puntos = más cobertura pero más llamadas a la API
-GRID_STEP_LON = 0.02   # ~1.5 km aprox.
-GRID_STEP_LAT = 0.02
+    # ── Av. Pedro Aguirre Cerda (norte a sur, ~10 km) ──────────
+    (-23.5440, -70.3882, "Av. Pedro Aguirre Cerda", "Norte - Mall La Portada"),
+    (-23.5510, -70.3888, "Av. Pedro Aguirre Cerda", "Norte - La Chimba"),
+    (-23.5580, -70.3895, "Av. Pedro Aguirre Cerda", "Norte - sector industrial"),
+    (-23.5650, -70.3900, "Av. Pedro Aguirre Cerda", "Norte - acceso ciudad"),
+    (-23.5720, -70.3908, "Av. Pedro Aguirre Cerda", "Centro norte"),
+    (-23.5790, -70.3915, "Av. Pedro Aguirre Cerda", "Centro norte - Huanchaca"),
+    (-23.5860, -70.3920, "Av. Pedro Aguirre Cerda", "Centro - Manuel Verbal"),
+    (-23.5930, -70.3928, "Av. Pedro Aguirre Cerda", "Centro"),
+    (-23.6000, -70.3935, "Av. Pedro Aguirre Cerda", "Centro sur"),
+    (-23.6070, -70.3940, "Av. Pedro Aguirre Cerda", "Sur - Villa Olímpica"),
+    (-23.6140, -70.3945, "Av. Pedro Aguirre Cerda", "Sur - sector residencial"),
+
+    # ── Av. Argentina (norte a sur, vía interior) ──────────────
+    (-23.5900, -70.3960, "Av. Argentina", "Norte - inicio"),
+    (-23.5980, -70.3975, "Av. Argentina", "Centro norte"),
+    (-23.6060, -70.3988, "Av. Argentina", "Centro"),
+    (-23.6140, -70.3998, "Av. Argentina", "Centro sur"),
+    (-23.6220, -70.4005, "Av. Argentina", "Sur - sector población"),
+    (-23.6300, -70.4010, "Av. Argentina", "Sur"),
+    (-23.6380, -70.4012, "Av. Argentina", "Sur - La Portada"),
+    (-23.6460, -70.4010, "Av. Argentina", "Sur - acceso sur"),
+    (-23.6540, -70.4008, "Av. Argentina", "Sur extremo"),
+    (-23.6620, -70.4007, "Av. Argentina", "Sur - límite"),
+    (-23.6700, -70.4007, "Av. Argentina", "Sur - Portezuelo"),
+
+    # ── Av. Balmaceda / Costanera (norte a sur, frente al mar) ─
+    (-23.6200, -70.3985, "Av. Balmaceda", "Norte - terminal pesquero"),
+    (-23.6260, -70.3978, "Av. Balmaceda", "Norte - sector puerto"),
+    (-23.6320, -70.3972, "Av. Balmaceda", "Centro norte - malecón"),
+    (-23.6380, -70.3968, "Av. Balmaceda", "Centro - frente playa"),
+    (-23.6440, -70.3975, "Av. Balmaceda", "Centro - MallPlaza"),
+    (-23.6500, -70.3990, "Av. Balmaceda", "Centro sur - costanera"),
+    (-23.6560, -70.4005, "Av. Balmaceda", "Sur - sector recreativo"),
+    (-23.6620, -70.4015, "Av. Balmaceda", "Sur - playa Trocadero"),
+
+    # ── Ruta 1 / Acceso Norte ───────────────────────────────────
+    (-23.5050, -70.3820, "Ruta 1 Norte", "Acceso norte - km 0"),
+    (-23.5150, -70.3838, "Ruta 1 Norte", "Acceso norte - km 1"),
+    (-23.5250, -70.3852, "Ruta 1 Norte", "Acceso norte - km 2"),
+    (-23.5350, -70.3865, "Ruta 1 Norte", "Acceso norte - km 3"),
+    (-23.5450, -70.3877, "Ruta 1 Norte", "Acceso norte - km 4 (empalme PAC)"),
+
+    # ── Acceso Sur (Ruta 1 sur) ─────────────────────────────────
+    (-23.7000, -70.4012, "Acceso Sur", "Sur - salida ciudad"),
+    (-23.7100, -70.4015, "Acceso Sur", "Sur - km 1"),
+    (-23.7200, -70.4018, "Acceso Sur", "Sur - km 2"),
+    (-23.7300, -70.4020, "Acceso Sur", "Sur - km 3"),
+
+    # ── Sector Centro (grilla densa ~300 m) ────────────────────
+    (-23.6300, -70.3980, "Centro", "Plaza Colón norte"),
+    (-23.6300, -70.4020, "Centro", "Sector judicial norte"),
+    (-23.6300, -70.4060, "Centro", "Sector oeste norte"),
+    (-23.6330, -70.3980, "Centro", "Calle Prat"),
+    (-23.6330, -70.4020, "Centro", "Calle San Martín"),
+    (-23.6330, -70.4060, "Centro", "Calle Matta"),
+    (-23.6360, -70.3980, "Centro", "Plaza Colón"),
+    (-23.6360, -70.4020, "Centro", "Centro comercial"),
+    (-23.6360, -70.4060, "Centro", "Sector banco / financiero"),
+    (-23.6390, -70.3980, "Centro", "Calle Iquique sur"),
+    (-23.6390, -70.4020, "Centro", "Av. Grecia"),
+    (-23.6390, -70.4060, "Centro", "Sector Uribe"),
+    (-23.6420, -70.3980, "Centro", "Sur centro - Latorre"),
+    (-23.6420, -70.4020, "Centro", "Sur centro - Condell"),
+    (-23.6420, -70.4060, "Centro", "Sur centro - sector poniente"),
+    (-23.6450, -70.3980, "Centro", "Acceso MallPlaza este"),
+    (-23.6450, -70.4020, "Centro", "MallPlaza - Balmaceda"),
+    (-23.6450, -70.4060, "Centro", "Sector poniente sur"),
+    (-23.6480, -70.3980, "Centro", "Sur límite centro"),
+    (-23.6480, -70.4020, "Centro", "Sur límite centro oeste"),
+]
+
+print(f"Total de puntos de muestreo: {len(PUNTOS_FIJOS)}")
+for via in ["Av. Pedro Aguirre Cerda", "Av. Argentina", "Av. Balmaceda",
+            "Ruta 1 Norte", "Acceso Sur", "Centro"]:
+    n = sum(1 for p in PUNTOS_FIJOS if p[2] == via)
+    print(f"  {via}: {n} puntos")
 
 # ─────────────────────────────────────────────
 # Schema del CSV de salida
 # ─────────────────────────────────────────────
 COLUMNAS_SCHEMA = {
-    # Identificación
-    "sample_point_lon":             "float64",
-    "sample_point_lat":             "float64",
-    # Datos de flujo
-    "current_speed_kmh":            "float64",
-    "free_flow_speed_kmh":          "float64",
-    "current_travel_time_seconds":  "float64",
-    "free_flow_travel_time_seconds":"float64",
-    "confidence":                   "float64",
-    "road_closure":                 "bool",
-    # Clasificación vial
-    "frc":                          "object",   # Functional Road Class (FRC0–FRC7)
-    "road_type":                    "object",
-    # Geometría del segmento
-    "segment_lon_start":            "float64",
-    "segment_lat_start":            "float64",
-    "segment_lon_end":              "float64",
-    "segment_lat_end":              "float64",
-    "coordinates_wkt":              "object",   # LINESTRING WKT
-    # Métricas derivadas
-    "speed_ratio":                  "float64",  # current / free_flow (1.0 = flujo libre)
-    "congestion_level":             "object",   # libre / lento / congestión / cierre
-    # Contexto temporal
-    "created_at":                   "object",
-    "hora_del_dia":                 "int64",
-    "dia_semana":                   "object",
-    "ingestion_batch_id":           "object",
-    # Contexto geográfico
-    "ciudad":                       "object",
-    "region":                       "object",
-    "region_codigo":                "int64",
+    "via":                           "object",
+    "tramo":                         "object",
+    "sample_point_lat":              "float64",
+    "sample_point_lon":              "float64",
+    "current_speed_kmh":             "float64",
+    "free_flow_speed_kmh":           "float64",
+    "current_travel_time_seconds":   "float64",
+    "free_flow_travel_time_seconds": "float64",
+    "confidence":                    "float64",
+    "road_closure":                  "bool",
+    "frc":                           "object",
+    "road_type":                     "object",
+    "segment_lat_start":             "float64",
+    "segment_lon_start":             "float64",
+    "segment_lat_end":               "float64",
+    "segment_lon_end":               "float64",
+    "coordinates_wkt":               "object",
+    "speed_ratio":                   "float64",
+    "congestion_level":              "object",
+    "created_at":                    "object",
+    "hora_del_dia":                  "int64",
+    "dia_semana":                    "object",
+    "ingestion_batch_id":            "object",
+    "ciudad":                        "object",
+    "region":                        "object",
+    "region_codigo":                 "int64",
 }
-
-
-# ─────────────────────────────────────────────
-# Generación de grilla de puntos de muestreo
-# ─────────────────────────────────────────────
-def generar_grilla(bbox, step_lon, step_lat):
-    """Genera lista de (lon, lat) dentro del bounding box."""
-    min_lon, min_lat, max_lon, max_lat = bbox
-    lons = []
-    lat = min_lat
-    while lat <= max_lat:
-        lons.append(lat)
-        lat = round(lat + step_lat, 6)
-
-    puntos = []
-    lon = min_lon
-    while lon <= max_lon:
-        for lat in lons:
-            puntos.append((round(lon, 6), round(lat, 6)))
-        lon = round(lon + step_lon, 6)
-    return puntos
 
 
 # ─────────────────────────────────────────────
 # Consulta a la API de TomTom Flow
 # ─────────────────────────────────────────────
-def consultar_flujo_punto(lon, lat, zoom=ZOOM):
-    """
-    Llama a flowSegmentData para un punto dado.
-    Retorna el dict de propiedades o None si falla.
-    """
+def consultar_flujo_punto(lat, lon):
     url = (
-        f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/{zoom}/json"
+        f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/{ZOOM}/json"
         f"?key={API_KEY}&point={lat},{lon}&unit=KMPH&openLr=false"
     )
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 404:
-            return None   # Sin datos viales en ese punto — normal en zonas sin cobertura
+            return None
         r.raise_for_status()
         return r.json().get("flowSegmentData", None)
     except Exception as e:
-        print(f"    ⚠️  Error en ({lon}, {lat}): {e}")
+        print(f"    ⚠️  Error en ({lat}, {lon}): {e}")
         return None
 
 
@@ -136,43 +177,42 @@ def clasificar_congestion(speed_ratio, road_closure):
 
 
 # ─────────────────────────────────────────────
-# Parseo de respuesta de flujo
+# Parseo de respuesta
 # ─────────────────────────────────────────────
-def parsear_segmento(data, sample_lon, sample_lat, ts, batch_id):
-    """Convierte un dict flowSegmentData en una fila del DataFrame."""
+def parsear_segmento(data, lat, lon, via, tramo, ts, batch_id):
     if not data:
         return None
 
-    current_speed   = data.get("currentSpeed")
-    freeflow_speed  = data.get("freeFlowSpeed")
-    current_tt      = data.get("currentTravelTime")
-    freeflow_tt     = data.get("freeFlowTravelTime")
-    confidence      = data.get("confidence")
-    road_closure    = data.get("roadClosure", False)
-    frc             = data.get("frc")
-    road_type       = data.get("roadType")
+    current_speed  = data.get("currentSpeed")
+    freeflow_speed = data.get("freeFlowSpeed")
+    current_tt     = data.get("currentTravelTime")
+    freeflow_tt    = data.get("freeFlowTravelTime")
+    confidence     = data.get("confidence")
+    road_closure   = data.get("roadClosure", False)
+    frc            = data.get("frc")
+    road_type      = data.get("roadType")
 
-    # Speed ratio
     speed_ratio = None
     if current_speed and freeflow_speed and freeflow_speed > 0:
         speed_ratio = round(current_speed / freeflow_speed, 4)
 
-    # Geometría del segmento
     coords = data.get("coordinates", {}).get("coordinate", [])
-    seg_start_lon = seg_start_lat = seg_end_lon = seg_end_lat = None
+    seg_start_lat = seg_start_lon = seg_end_lat = seg_end_lon = None
     wkt = None
     if coords:
-        seg_start_lon = coords[0].get("longitude")
         seg_start_lat = coords[0].get("latitude")
-        seg_end_lon   = coords[-1].get("longitude")
+        seg_start_lon = coords[0].get("longitude")
         seg_end_lat   = coords[-1].get("latitude")
+        seg_end_lon   = coords[-1].get("longitude")
         wkt = "LINESTRING(" + ", ".join(
             f"{c.get('longitude')} {c.get('latitude')}" for c in coords
         ) + ")"
 
     return {
-        "sample_point_lon":              sample_lon,
-        "sample_point_lat":              sample_lat,
+        "via":                           via,
+        "tramo":                         tramo,
+        "sample_point_lat":              lat,
+        "sample_point_lon":              lon,
         "current_speed_kmh":             current_speed,
         "free_flow_speed_kmh":           freeflow_speed,
         "current_travel_time_seconds":   current_tt,
@@ -181,10 +221,10 @@ def parsear_segmento(data, sample_lon, sample_lat, ts, batch_id):
         "road_closure":                  road_closure,
         "frc":                           frc,
         "road_type":                     road_type,
-        "segment_lon_start":             seg_start_lon,
         "segment_lat_start":             seg_start_lat,
-        "segment_lon_end":               seg_end_lon,
+        "segment_lon_start":             seg_start_lon,
         "segment_lat_end":               seg_end_lat,
+        "segment_lon_end":               seg_end_lon,
         "coordinates_wkt":               wkt,
         "speed_ratio":                   speed_ratio,
         "congestion_level":              clasificar_congestion(speed_ratio, road_closure),
@@ -199,7 +239,7 @@ def parsear_segmento(data, sample_lon, sample_lat, ts, batch_id):
 
 
 # ─────────────────────────────────────────────
-# Aplicar schema al DataFrame
+# Aplicar schema
 # ─────────────────────────────────────────────
 def aplicar_schema(df):
     for col in COLUMNAS_SCHEMA:
@@ -222,23 +262,7 @@ def aplicar_schema(df):
 
 
 # ─────────────────────────────────────────────
-# Deduplicación de segmentos
-# ─────────────────────────────────────────────
-def deduplicar(df):
-    """
-    Elimina segmentos duplicados dentro del mismo batch:
-    el mismo segmento vial puede ser devuelto por varios puntos de muestreo.
-    Se considera duplicado si tienen el mismo WKT + ingestion_batch_id.
-    """
-    if "coordinates_wkt" in df.columns and "ingestion_batch_id" in df.columns:
-        antes = len(df)
-        df = df.drop_duplicates(subset=["coordinates_wkt", "ingestion_batch_id"])
-        print(f"  Deduplicados {antes - len(df)} segmentos repetidos dentro del batch")
-    return df
-
-
-# ─────────────────────────────────────────────
-# Exportar CSV a GitHub
+# Exportar a GitHub
 # ─────────────────────────────────────────────
 def exportar_a_github():
     if not GITHUB_TOKEN:
@@ -272,11 +296,8 @@ def exportar_a_github():
 
 
 # ─────────────────────────────────────────────
-# Ciclo principal de recolección
+# Ciclo principal
 # ─────────────────────────────────────────────
-GRILLA = generar_grilla(ANTOFAGASTA_BBOX, GRID_STEP_LON, GRID_STEP_LAT)
-print(f"Grilla generada: {len(GRILLA)} puntos de muestreo en Antofagasta")
-
 ciclo = 0
 
 def recolectar():
@@ -284,21 +305,23 @@ def recolectar():
     ciclo += 1
     ts = datetime.now(timezone.utc)
     batch_id = f"flujo_batch_{int(ts.timestamp())}"
-    print(f"\n[{ts.strftime('%Y-%m-%d %H:%M:%S')} UTC] Ciclo {ciclo} — Consultando flujo...")
+    print(f"\n[{ts.strftime('%Y-%m-%d %H:%M:%S')} UTC] Ciclo {ciclo} — {len(PUNTOS_FIJOS)} puntos...")
 
     filas = []
     sin_datos = 0
-    for lon, lat in GRILLA:
-        data = consultar_flujo_punto(lon, lat)
+
+    for lat, lon, via, tramo in PUNTOS_FIJOS:
+        data = consultar_flujo_punto(lat, lon)
         if data:
-            fila = parsear_segmento(data, lon, lat, ts, batch_id)
+            fila = parsear_segmento(data, lat, lon, via, tramo, ts, batch_id)
             if fila:
                 filas.append(fila)
         else:
             sin_datos += 1
-        time.sleep(0.05)  # ~20 req/s — respetar rate limit de TomTom
+            print(f"    Sin datos: {via} / {tramo}")
+        time.sleep(0.1)  # 10 req/s — margen seguro
 
-    print(f"  Puntos con datos: {len(filas)} | Sin cobertura vial: {sin_datos}")
+    print(f"  ✅ Con datos: {len(filas)} | Sin cobertura: {sin_datos}")
 
     if not filas:
         print("  Sin filas nuevas — se omite escritura")
@@ -306,7 +329,11 @@ def recolectar():
 
     df_nuevo = pd.DataFrame(filas)
     df_nuevo = aplicar_schema(df_nuevo)
-    df_nuevo = deduplicar(df_nuevo)
+
+    # Resumen por vía
+    resumen = df_nuevo.groupby("via")["current_speed_kmh"].mean().round(1)
+    for via, vel in resumen.items():
+        print(f"    {via}: {vel} km/h promedio")
 
     os.makedirs("data", exist_ok=True)
 
@@ -318,15 +345,8 @@ def recolectar():
 
     df_total = aplicar_schema(df_total)
     df_total.to_csv(OUTPUT_FILE, index=False)
-    print(f"  ✅ Total acumulado: {len(df_total)} filas guardadas en {OUTPUT_FILE}")
+    print(f"  Total acumulado: {len(df_total)} filas en {OUTPUT_FILE}")
 
-    # Estadísticas rápidas del batch actual
-    if "current_speed_kmh" in df_nuevo.columns:
-        vel_media = df_nuevo["current_speed_kmh"].mean()
-        congest = df_nuevo["congestion_level"].value_counts().to_dict()
-        print(f"  📊 Velocidad media: {vel_media:.1f} km/h | Niveles: {congest}")
-
-    # Exportar a GitHub cada 6 ciclos (~2 horas)
     if ciclo % 6 == 0:
         print("  Exportando a GitHub...")
         exportar_a_github()
@@ -336,10 +356,10 @@ def recolectar():
 # Arranque
 # ─────────────────────────────────────────────
 recolectar()
-#cambiar 20
-schedule.every(5).minutes.do(recolectar)
 
-print(f"\nScheduler activo. Recolectando cada 20 min, exportando a GitHub cada 2 horas (~6 ciclos)...")
+schedule.every(20).minutes.do(recolectar)
+
+print("\nScheduler activo. Recolectando cada 20 min, exportando a GitHub cada 2 horas...")
 while True:
     schedule.run_pending()
     time.sleep(1)
